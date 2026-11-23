@@ -1,10 +1,13 @@
 """Sensor platform for Private Jack integration."""
 
+from datetime import timedelta
 import logging
+from time import monotonic
 from typing import Any
 
 from homeassistant.components import bluetooth
 from homeassistant.components.sensor import (
+    DOMAIN as SENSOR_DOMAIN,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
@@ -22,8 +25,10 @@ from homeassistant.const import (
     UnitOfTime,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, CONF_DEVICE_ADDRESS, CONF_DEVICE_NAME
 from .coordinator import JackeryBleCoordinator
@@ -183,14 +188,19 @@ async def async_setup_entry(
     else:
         disabled_keys = _BOX_KEYS
 
-    entities = [
+    entities: list[SensorEntity] = [
         JackeryBleSensor(
             coordinator, description, config_entry,
             enabled_default=description.key not in disabled_keys,
         )
         for description in ALL_SENSOR_DESCRIPTIONS
     ]
-    entities.append(JackeryBleSignalSensor(coordinator, config_entry))
+    # Reuse an existing legacy registry entry, even if the user renamed or disabled it.
+    legacy_id = f"{config_entry.data[CONF_DEVICE_ADDRESS]}_sa_bt_signal"
+    if er.async_get(hass).async_get_entity_id(SENSOR_DOMAIN, DOMAIN, legacy_id):
+        entities.append(_LegacySignalSensor(coordinator, config_entry, legacy_id))
+    else:
+        entities.append(JackeryBleSignalSensor(coordinator, config_entry))
     async_add_entities(entities)
 
 
@@ -335,3 +345,37 @@ class JackeryBleSignalSensor(CoordinatorEntity[JackeryBleCoordinator], SensorEnt
             and self.coordinator.data is not None
             and bool(self._rssi_by_source())
         )
+
+
+class _LegacySignalSensor(JackeryBleSignalSensor):
+    """Expose the original signal identity and attributes on upgraded installations."""
+
+    _attr_entity_registry_enabled_default = True
+
+    def __init__(
+        self, coordinator: JackeryBleCoordinator, config_entry: ConfigEntry, legacy_id: str
+    ) -> None:
+        super().__init__(coordinator, config_entry)
+        self._attr_unique_id = legacy_id
+        self._seen_time: float | None = None
+        self._last_advert_at: str | None = None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Add the legacy names and UTC timestamp of the last advertisement."""
+        attrs = super().extra_state_attributes
+        if attrs is None:
+            return None
+        info = bluetooth.async_last_service_info(self.hass, self._address, connectable=True)
+        if info is not None and info.time != self._seen_time:
+            self._seen_time = info.time
+            age = max(monotonic() - info.time, 0)
+            self._last_advert_at = (dt_util.utcnow() - timedelta(seconds=age)).isoformat(
+                timespec="seconds"
+            )
+        attrs.update(
+            radio=attrs["best_source"],
+            per_radio=attrs["rssi_by_source"],
+            last_advert_at=self._last_advert_at,
+        )
+        return attrs
