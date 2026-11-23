@@ -60,8 +60,6 @@ The **Explorer 5000 Plus** (model code 13) is confirmed working as well.
 
 ### Manual Installation
 
-For this fork's combined changes, download the [`develop` branch ZIP](https://github.com/myurasov/private_jack/archive/refs/heads/develop.zip) and extract it. If Private Jack is already installed, back up the existing `custom_components/private_jack` folder first.
-
 1. Copy the `custom_components/private_jack` folder into your Home Assistant `config/custom_components/` directory:
 
 ```
