@@ -48,6 +48,7 @@ class JackeryBleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._model_code: Optional[int] = config_data.get(CONF_MODEL_CODE)
 
         self._client: Optional[JackeryBleClient] = None
+        self._connect_lock = asyncio.Lock()
         self._command_builder = CommandBuilder(self._device_type)
         self._parser = DeviceDataParser(self._device_type)
         self._connected = False
@@ -74,11 +75,15 @@ class JackeryBleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _ensure_connected(self) -> bool:
         """Ensure BLE connection is active, reconnecting if needed."""
-        if self._client and self._client.is_connected:
-            return True
+        async with self._connect_lock:
+            if self._client and self._client.is_connected:
+                return True
+            return await self._connect()
 
-        self._connected = False
+    async def _connect(self) -> bool:
+        """Set up a new client while holding the connect lock."""
         _LOGGER.debug("Connecting to %s (%s)", self._device_name, self._address)
+        self._connected = False
 
         ble_device = async_ble_device_from_address(self.hass, self._address, connectable=True)
         if not ble_device:
@@ -86,7 +91,7 @@ class JackeryBleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"Device {self._device_name} ({self._address}) not found by HA Bluetooth"
             )
 
-        self._client = JackeryBleClient(
+        jackery_client = JackeryBleClient(
             encryption_key=self._encryption_key,
             device_type=self._device_type,
             key_is_base64=True if self._encryption_key else False,
@@ -97,15 +102,16 @@ class JackeryBleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             BleakClient, ble_device, self._device_name
         )
 
-        await self._client.connect_with_client(client, self._device_name, raise_on_error=True)
+        await jackery_client.connect_with_client(client, self._device_name, raise_on_error=True)
 
+        self._client = jackery_client
         self._connected = True
 
         # Sync time after connecting
         try:
             utc_offset = -time.timezone if time.daylight == 0 else -time.altzone
             cmd = self._command_builder.sync_time(utc_offset)
-            await self._client.send_command(cmd, wait_response=False)
+            await jackery_client.send_command(cmd, wait_response=False)
         except Exception as e:
             _LOGGER.debug("Time sync failed: %s", e)
 
@@ -181,7 +187,8 @@ class JackeryBleCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_shutdown(self) -> None:
         """Disconnect on shutdown."""
-        if self._client:
-            await self._client.disconnect()
-            self._client = None
-            self._connected = False
+        async with self._connect_lock:
+            if self._client:
+                await self._client.disconnect()
+                self._client = None
+                self._connected = False
